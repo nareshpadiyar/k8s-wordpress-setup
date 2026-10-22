@@ -178,14 +178,18 @@ apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: mysql-pv
-  namespace: wordpress-app
+  labels:
+    app: mysql
 spec:
   capacity:
     storage: 5Gi
   accessModes:
     - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
   hostPath:
     path: /mnt/data/mysql
+    type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -195,6 +199,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: manual
   resources:
     requests:
       storage: 5Gi
