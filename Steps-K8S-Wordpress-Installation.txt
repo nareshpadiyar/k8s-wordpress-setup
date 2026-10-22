@@ -1,0 +1,324 @@
+Kubernetes - Wordpress Installation Steps
+
+
+Steps to setup a full stack word press website on kubernetes cluster
+
+The entire setup consists of two tiers, the database tier and the application tier. The database tier consists of a MySQL StatefulSet with 1 replica and a ClusterIP service. The application tier consists of a WordPress Deployment with 2 replicas and a LoadBalancer service.
+
+Note:  Single-instance MySQL 5.7 cannot be scaled simply by increasing replica counts. 
+You must use a database replication solution like MySQL InnoDB Cluster, Bitnami MySQL Operator, or Percona XtraDB Cluster, which handle primary-replica data replication and separate dynamic PVCs.
+For a StatefulSet to scale horizontally in Kubernetes, each pod (mysql-0, mysql-1, mysql-2) requires its own independent PVC. This is usually done using volumeClaimTemplates instead of a static volumes array.
+In below example, we are using a single replica of MySQL StatefulSet with a static PVC for simplicity. For production workloads, consider using a more robust database solution.
+
+====================================================== 
+
+1. Connect to the IKS Cluster
+
+ibmcloud login -a cloud.ibm.com --sso
+
+ibmcloud ks cluster config -c {CLUSTER_ID}
+
+Verify if the cluster was connected successfully
+kubectl get nodes -o wide
+
+====================================================== 
+
+2. Create a Namespace for the WordPress Application
+
+kubectl create namespace wordpress-app
+
+====================================================== 
+
+3. Create a Secret for MySQL Password
+
+# mysql-secret.yaml
+-------------
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: wordpress-app
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: mypassword
+  MYSQL_DATABASE: wordpress
+
+-------------
+
+====================================================== 
+
+4. Create Persistent Volume and Persistent Volume Claim for MySQL
+
+# mysql-pv-pvc.yaml
+-------------
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mysql-pv
+  labels:
+    app: mysql
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /mnt/data/mysql
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+  namespace: wordpress-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 5Gi
+  selector:
+    matchLabels:
+      app: mysql
+
+-------------
+
+====================================================== 
+
+5. Create MySQL StatefulSet
+
+# mysql-statefulset.yaml
+-------------
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: wordpress-app
+  labels:
+    app: mysql
+spec:
+  replicas: 1
+  serviceName: mysql
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: database
+        image: mysql:5.7
+        args:
+          - "--ignore-db-dir=lost+found"
+        envFrom:
+          - secretRef:
+              name: mysql-secret
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+      volumes:
+          - name: mysql-data
+            persistentVolumeClaim:
+              claimName: mysql-pvc
+
+-------------
+
+====================================================== 
+
+6. Create Mysql ClusterIP Service
+
+# mysql-service.yaml
+
+-------------
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+  namespace: wordpress-app
+spec:
+  ports:
+  - port: 3306
+    protocol: TCP
+  selector:
+    app: mysql
+
+-------------
+
+====================================================== 
+
+7. Create Persistent Volume and Persistent Volume Claim for WordPress
+
+# wordpress-pv-pvc.yaml
+
+-------------
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: wordpress-pv
+  namespace: wordpress-app
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /home/ubuntu/project/wp-data 
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-pvc
+  namespace: wordpress-app
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: manual
+
+-------------
+
+====================================================== 
+
+8. Create WordPress Deployment
+
+# wordpress-deployment.yaml
+-------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  namespace: wordpress-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: wordpress
+  template:
+    metadata:
+      labels:
+        app: wordpress
+    spec:
+      containers:
+        - name: wordpress
+          image: wordpress:5.8.3-php7.4-apache
+          ports:
+            - containerPort: 80
+              name: wordpress
+          volumeMounts:
+            - name: wordpress-data
+              mountPath: /var/www/html
+          env:
+            - name: WORDPRESS_DB_HOST
+              value: mysql-service:3306
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: WORDPRESS_DB_USER
+              value: root
+            - name: WORDPRESS_DB_NAME
+              value: wordpress
+      volumes:
+        - name: wordpress-data
+          persistentVolumeClaim:
+            claimName: wordpress-pvc
+
+-------------
+
+====================================================== 
+
+9. Create WordPress LoadBalancer Service
+
+# wordpress-service.yaml
+-------------
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress-service
+  namespace: wordpress-app
+  labels:
+    app: wordpress
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+  selector:
+    app: wordpress
+
+-------------
+
+====================================================== 
+
+10.1. Apply the Configurations
+
+-------------
+
+10.1. Create Database Tier
+kubectl apply -f mysql-secret.yaml
+kubectl apply -f mysql-pv-pvc.yaml
+kubectl apply -f mysql-statefulset.yaml
+kubectl apply -f mysql-service.yaml
+
+-------------
+
+10.2. Create Application Tier
+kubectl apply -f wordpress-pv-pvc.yaml
+kubectl apply -f wordpress-deployment.yaml
+kubectl apply -f wordpress-service.yaml
+
+-------------
+
+10.3. Verify the Deployment
+watch -d "kubectl get all -n wordpress-app"
+
+-------------
+
+10.4. Access the WordPress Application
+- Get the External IP of the WordPress Service
+kubectl get svc -n wordpress-app | grep "wordpress-service" | awk '{ print $4 }'
+
+-------------
+
+====================================================== 
+Wordpress Deployment is complete and the application is accessible via the External IP address on port 80. You can open a web browser and navigate to http://<External-IP> to complete the WordPress setup.
+
+
+Troubleshooting:
+
+To get the MySQL root password, you can use the following command:
+kubectl get secret mysql-secret -n wordpress-app -o jsonpath="{.data.MYSQL_ROOT_PASSWORD}" | base64 --decode
+echo ""
+
+Connect to the MySQL database running in the StatefulSet can be done using the following command:
+kubectl exec -it pod/mysql-0 -n wordpress-app -- mysql -u root -p
+
+
+Cleanup
+Perform the following commands to delete the resources created for the WordPress application:
+kubectl delete secret mysql-secret -n wordpress-app
+kubectl delete deployment wordpress -n wordpress-app
+kubectl delete statefulset mysql -n wordpress-app
+kubectl delete pvc mysql-pvc wordpress-pvc -n wordpress-app
+kubectl delete pv mysql-pv wordpress-pv -n wordpress-app
+kubectl delete service mysql-service wordpress-service -n wordpress-app
+
